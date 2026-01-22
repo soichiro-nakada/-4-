@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
-import plotly.express as px  # 追加
+import plotly.express as px
+import plotly.graph_objects as go
 from .constants import ACCOUNT_TYPE_MAP, TYPE_ORDER, DYNAMIC_ACCOUNTS, PAGE_CONFIG
 from .data_loader import *
 
@@ -11,7 +12,9 @@ def create_dashboard(df, df_tb):
 
     # --- データの準備 ---
     # 試算表データから、分類ごとのデータを抽出
-    df_clean = df_tb.reset_index()
+    metrics, df_clean = _prepare_kpi_data(df_tb)
+    # KPIメトリクス表示
+    _display_kpi_metrics(metrics)
     
     # 損益と資産のデータを抽出
     df_pl = df_clean[df_clean['分類'].isin(['費用', '収益'])]
@@ -30,97 +33,139 @@ def create_dashboard(df, df_tb):
     # 純資産 (資産 - 負債) ※これが真の資産
     net_assets = total_assets - total_liabilities
 
-    # --- A. KPIメトリクス（最上段） ---
-    st.subheader('✅ Summary')
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric('純資産総額', chr(165) + f'{net_assets:,.0f}')
-    col2.metric('資産総額', chr(165) + f'{total_assets:,.0f}')
-    col3.metric('当期純利益', chr(165) + f'{net_income:,.0f}', delta_color='normal')
-    col4.metric('費用合計', chr(165) + f'{total_expense:,.0f}', delta_color='inverse') # 費用は増えると赤字(inverse)
-
-    st.subheader('📈 純資産の推移')
-
-    df_trend = calculate_daily_trends(df)
-    
-    if not df_trend.empty:
-        # 1. 折れ線グラフとして描画 (px.line)
-        #    ※描画順序が重要です。一番大きい「資産」を最初に描くことで、
-        #    後ろに隠れてしまうのを防ぎます（リストの先頭が最背面になります）
-        fig_trend = px.line(
-            df_trend, 
-            x='日付', 
-            y=['資産', '純資産', '負債'], # 大きい順（資産）を先に書くのがコツ
-            title='資産・負債・純資産の推移',
-            color_discrete_map={
-                # 原色(青・緑・赤)を明るくしたカラーコード
-                '資産': '#6699FF',   # 薄いブルー (CornflowerBlue系)
-                '純資産': '#66FF99', # 薄いグリーン (SpringGreenを淡くした感じ)
-                '負債': '#FF9999'    # 薄いレッド (Salmon/LightCoral系)
-            }
-        )
-        
-        # 2. 塗りつぶし設定を追加 (ここがポイント！)
-        #    fill='tozeroy': 0のラインまで色を塗る設定
-        fig_trend.update_traces(fill='tozeroy', opacity=0.6)
-        
-        # (オプション) レイアウト調整
-        fig_trend.update_layout(
-            xaxis_title='日付',
-            yaxis_title='金額 (円)',
-            hovermode='x unified',
-            yaxis=dict(
-                # tickformat=',.0f' : カンマ区切りで整数表示 (例: 3,000,000)
-                # tickprefix='¥'    : 数字の前に円マークをつける
-                tickformat=',.0f', 
-                tickprefix=chr(165)
-            ),
-            xaxis=dict(
-                # tickformat='%Y/%m/%d' : 2025/01/01 の形式で表示
-                tickformat='%Y/%m/%d'
-            )
-        )
-
-        # ホバー（マウスオーバー）時のフォーマットも合わせる
-        fig_trend.update_traces(
-            hovertemplate='%{y:,.0f} 円' # ホバー時に「3,000,000 円」と表示
-        )
-        
-        st.plotly_chart(fig_trend, use_container_width=True)
-    else:
-        st.info('推移を表示するためのデータが不足しています')
+    _display_asset_trend_chart(df)
 
     st.divider()
 
-    # --- B. 円グラフ（中段） ---
+    # --- B. 円グラフ ---
+    _display_allocation_pie_charts(df_clean)
+    
+    # --- C. 日次推移グラフ ---
+    _display_daily_bar_chart(df)
+
+    # --- D. 費用・収益推移グラフ
+    df_cf = calculate_monthly_cashflow(df)
+    display_monthly_cashflow(df_cf)
+    
+
+def _prepare_kpi_data(df_tb):
+    '''データの前処理とKPI計算を行う'''
+    # 試算表データから、分類ごとのデータを抽出
+    df_clean = df_tb.reset_index()
+    
+    # 損益と資産のデータを抽出
+    df_assets = df_clean[df_clean['分類'] == '資産']
+    
+    # KPI計算
+    total_revenue = df_clean[df_clean['分類'] == '収益']['残高'].sum()
+    total_expense = df_clean[df_clean['分類'] == '費用']['残高'].sum()
+    net_income = total_revenue - total_expense
+    total_assets = df_assets['残高'].sum()
+
+    # 負債合計
+    df_liabilities = df_clean[df_clean['分類'] == '負債']
+    total_liabilities = df_liabilities['残高'].sum()
+    
+    # 純資産
+    net_assets = total_assets - total_liabilities
+    
+    # 結果を辞書にまとめる
+    metrics = {
+        'net_assets': net_assets,
+        'total_assets': total_assets,
+        'net_income': net_income,
+        'total_expense': total_expense
+    }
+    
+    return metrics, df_clean
+
+def _display_kpi_metrics(metrics):
+    '''最上段の重要指標を表示する'''
+    st.subheader('✅ Summary')
+    col1, col2, col3, col4 = st.columns(4)
+    
+    # 円マーク
+    yen = chr(165)
+    
+    col1.metric('純資産総額', f'{yen}{metrics['net_assets']:,.0f}')
+    col2.metric('資産総額', f'{yen}{metrics['total_assets']:,.0f}')
+    col3.metric('当期純利益', f'{yen}{metrics['net_income']:,.0f}', delta_color='normal')
+    col4.metric('費用合計', f'{yen}{metrics['total_expense']:,.0f}', delta_color='inverse')
+
+def _display_asset_trend_chart(df):
+    '''資産・負債・純資産の推移グラフを表示する'''
+    st.subheader('📈 純資産の推移')
+    
+    # データの計算（別モジュールからimportが必要な場合は関数の外でimportしておく）
+    from src.data_loader import calculate_daily_trends
+    df_trend = calculate_daily_trends(df)
+    
+    if df_trend.empty:
+        st.info('推移を表示するためのデータが不足しています')
+        return
+
+    # 折れ線グラフ描画
+    fig_trend = px.line(
+        df_trend, 
+        x='日付', 
+        y=['資産', '純資産', '負債'], 
+        title='資産・負債・純資産の推移',
+        color_discrete_map={
+            '資産': '#6699FF',   # 薄いブルー
+            '純資産': '#66FF99', # 薄いグリーン
+            '負債': '#FF9999'    # 薄いレッド
+        }
+    )
+    
+    # 塗りつぶし設定
+    fig_trend.update_traces(fill='tozeroy', opacity=0.6)
+    
+    # レイアウト調整
+    fig_trend.update_layout(
+        xaxis_title='日付',
+        yaxis_title='金額 (円)',
+        hovermode='x unified',
+        yaxis=dict(tickformat=',.0f', tickprefix=chr(165)),
+        xaxis=dict(tickformat='%Y/%m/%d')
+    )
+
+    # ホバーフォーマット
+    fig_trend.update_traces(hovertemplate='%{y:,.0f} 円')
+    
+    st.plotly_chart(fig_trend, use_container_width=True)
+
+def _display_allocation_pie_charts(df_clean):
+    '''中段の円グラフ（費用内訳・資産PF）を表示する'''
     col_left, col_right = st.columns(2)
 
+    # --- 左側：費用の内訳 ---
     with col_left:
         st.subheader('費用の内訳')
-        # 1. 費用データを抽出して、残高の降順（大きい順）にソートする
-        df_expense_pie = df_clean[df_clean['分類'] == '費用'].sort_values(by='残高', ascending=False)
-        if not df_expense_pie.empty:
+        df_expense = df_clean[df_clean['分類'] == '費用'].sort_values(by='残高', ascending=False)
+        
+        if not df_expense.empty:
             fig_exp = px.pie(
-                df_expense_pie, 
+                df_expense, 
                 values='残高', 
                 names='勘定科目',
-                hole=0.4, # ドーナツ型にする
+                hole=0.4,
             )
+            # 見た目の調整（時計回り・ソート固定）
             fig_exp.update_traces(
-                sort=False,           # Plotlyの自動ソートを無効化（DataFrameの順序を守らせる）
-                direction='clockwise',# 時計回りに並べる
-                rotation=0,          # 12時の位置（90度）から開始する
+                sort=False,
+                direction='clockwise',
+                rotation=0,
                 textinfo='label+percent'
             )
-            fig_exp.update_layout(showlegend=False) # 凡例を消してスッキリさせる
-            fig_exp.update_traces(textinfo='label+percent') # ラベルと％を表示
+            fig_exp.update_layout(showlegend=False)
             st.plotly_chart(fig_exp, use_container_width=True)
         else:
             st.info('費用データがありません')
 
+    # --- 右側：資産ポートフォリオ ---
     with col_right:
         st.subheader('資産ポートフォリオ')
-
-        df_assets = df_assets.sort_values(by='残高', ascending=False)
+        df_assets = df_clean[df_clean['分類'] == '資産'].sort_values(by='残高', ascending=False)
         
         if not df_assets.empty:
             fig_asset = px.pie(
@@ -130,37 +175,34 @@ def create_dashboard(df, df_tb):
                 hole=0.4,
             )
             fig_asset.update_traces(
-                sort=False,           # Plotlyの自動ソートを無効化（DataFrameの順序を守らせる）
-                direction='clockwise',# 時計回りに並べる
-                rotation=0,          # 12時の位置（90度）から開始する
+                sort=False,
+                direction='clockwise',
+                rotation=0,
                 textinfo='label+percent'
             )
             fig_asset.update_layout(showlegend=False)
-            fig_asset.update_traces(textinfo='label+percent')
             st.plotly_chart(fig_asset, use_container_width=True)
         else:
             st.info('資産データがありません')
 
-    # --- C. 日次推移グラフ（下段） ---
+def _display_daily_bar_chart(df):
+    '''下段の日次費用グラフを表示する'''
     st.subheader('日次収支の推移')
     
-    # 元の仕訳データ(df)を使って、日ごとの集計を行う必要があります
-    # 1. 仕訳データに「分類」をマッピングする
-    #    (借方・貸方それぞれにマッピングして、費用と収益だけ抜き出す処理)
-    
-    # 簡易的に借方(費用)の発生日ベースで集計します
+    # データの加工
     df_daily = df.copy()
-    # 日付、摘要欄を埋める
     df_daily['日付'] = df_daily['日付'].ffill()
-    df_daily['摘要'] = df_daily['摘要'].ffill()
-    # 借方科目の分類をマッピング
+    # マッピング用辞書が必要（globalから取得またはimport）
+    # from src.data_loader import ACCOUNT_TYPE_MAP # 必要に応じて
+    
+    # 分類マッピング
     df_daily['借方分類'] = df_daily['勘定科目(借方)'].map(ACCOUNT_TYPE_MAP)
     
     # 費用データのみ抽出
     df_expenses_daily = df_daily[df_daily['借方分類'] == '費用'].copy()
     
     if not df_expenses_daily.empty:
-        # 日付と科目で集計
+        # 集計
         daily_agg = df_expenses_daily.groupby(['日付', '勘定科目(借方)'])['借方金額'].sum().reset_index()
         
         # 積み上げ棒グラフ
@@ -168,9 +210,15 @@ def create_dashboard(df, df_tb):
             daily_agg,
             x='日付',
             y='借方金額',
-            color='勘定科目(借方)', # 科目ごとに色分け
+            color='勘定科目(借方)',
             title='日別の費用発生状況'
         )
+        # 見やすさ調整（任意）
+        fig_bar.update_layout(
+            yaxis=dict(tickformat=',.0f', tickprefix=chr(165)),
+            xaxis=dict(tickformat='%Y/%m/%d')
+        )
+        
         st.plotly_chart(fig_bar, use_container_width=True)
     else:
         st.info('日次の費用データがありません')
@@ -350,3 +398,92 @@ def display_finalcial_statements(df):
             elif net_income >= 0:
                 # 見た目を揃えるための空行などを入れてもいいですが、ここではシンプルに
                 pass
+
+# 月次のキャッシュフローを表示する関数
+def display_monthly_cashflow(df_cf):
+    '''
+    月次キャッシュフローと年間累積収支の複合グラフを表示する
+    '''
+    st.subheader('📊 キャッシュフローと貯蓄推移')
+    
+    if df_cf.empty:
+        st.info('表示するデータがありません')
+        return
+
+    # グラフ作成
+    fig = go.Figure()
+
+    # --- 左軸 (y1) ---
+    
+    # 1. 収入
+    fig.add_trace(go.Bar(
+        x=df_cf['月'], y=df_cf['収入'],
+        name='収入', marker_color='#6699FF', opacity=0.6,
+        yaxis='y' # 左軸
+    ))
+
+    # 2. 支出
+    fig.add_trace(go.Bar(
+        x=df_cf['月'], y=df_cf['支出'],
+        name='支出', marker_color='#FF9999', opacity=0.6,
+        yaxis='y' # 左軸
+    ))
+
+    # 3. 月次収支 (緑の折れ線)
+    fig.add_trace(go.Scatter(
+        x=df_cf['月'], y=df_cf['収支'],
+        name='月次収支',
+        line=dict(color='#2ca02c', width=3),
+        mode='lines+markers',
+        yaxis='y' # 左軸
+    ))
+
+    # --- 右軸 (y2) 【ここを追加】 ---
+    
+    # 4. 年間累積収支 (オレンジの破線 + エリア)
+    fig.add_trace(go.Scatter(
+        x=df_cf['月'], y=df_cf['年間累積収支'],
+        name='年間貯蓄累計',
+        line=dict(color='#FF9800', width=2, dash='dot'), # オレンジ色の点線
+        mode='lines',
+        fill='tozeroy', # 下を塗りつぶすと「積み上がってる感」が出る
+        fillcolor='rgba(255, 152, 0, 0.1)', # 薄いオレンジ
+        yaxis='y2' # ★右軸を指定
+    ))
+
+    # --- レイアウト設定 ---
+    fig.update_layout(
+        title='月次収支と年間貯蓄の積み上げ',
+        xaxis_title='年月',
+        hovermode='x unified',
+        
+        # 左軸 (月次用)
+        yaxis=dict(
+            title='月次金額 (円)',
+            tickformat=',.0f',
+            side='left'
+        ),
+        
+        # 右軸 (累積用)
+        yaxis2=dict(
+            # titleプロパティの中に text と font をまとめる
+            title=dict(
+                text='年間累積 (円)',
+                font=dict(color='#FF9800')
+            ),
+            tickfont=dict(color='#FF9800'),
+            tickformat=',.0f',
+            overlaying='y',
+            side='right',
+            showgrid=False
+        ),
+        
+        legend=dict(
+            orientation='h',
+            yanchor='bottom', y=1.05,
+            xanchor='right', x=1
+        ),
+        barmode='group'
+    )
+
+    st.plotly_chart(fig, use_container_width=True)

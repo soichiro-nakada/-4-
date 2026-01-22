@@ -142,6 +142,7 @@ def create_trial_balance(df):
 
     return tb
 
+# 現金過不足等、費用・収益の分類が不明の科目を判定
 def _tb_dynamic_account_type(tb):
     for account in DYNAMIC_ACCOUNTS:
         if account in tb.index:
@@ -208,7 +209,7 @@ def create_financial_statements(tb):
 
     return df_pl, df_bs
 
-# New!! 取引IDを参照することで、期間内の仕訳表を抜き出す
+# 取引IDを参照することで、期間内の仕訳表を抜き出す
 def extract_period_data(df, start_date, end_date):
     '''
     指定期間に含まれる取引を、複合仕訳(日付なし行)も含めて丸ごと抽出する
@@ -229,7 +230,7 @@ def extract_period_data(df, start_date, end_date):
     
     return df_period
 
-# New!! 「データ内の最初の日付以外にある繰越仕訳」 を削除して返す関数
+# 「データ内の最初の日付以外にある繰越仕訳」 を削除して返す関数
 def remove_intermediate_carry_forwards(df):
     '''
     複数の会計期間を含むデータから、途中の繰越仕訳（開始残高など）を除去し、
@@ -262,7 +263,7 @@ def remove_intermediate_carry_forwards(df):
 
     return df_result
 
-# New!! 資産・負債・純資産の日時データを作成する。
+# 資産・負債・純資産の日時データを作成する。
 def calculate_daily_trends(df):
     '''
     資産・負債・純資産の日次推移データを計算する
@@ -328,3 +329,65 @@ def calculate_daily_trends(df):
     
     # 整形して返す
     return daily_balances.reset_index()
+
+# New!! 月ごとのキャッシュフローを計算する。
+def calculate_monthly_cashflow(df):
+    # 1. 日付、摘要の空欄は埋めておく
+    df_copy = df.copy()
+    df_copy['日付'] = df_copy['日付'].ffill()
+    df_copy['摘要'] = df_copy['摘要'].ffill()
+    
+    # 2. 必要なデータ（収益・費用）のみ抽出
+    #    make_ledger_dataを使わずに元データから集計します（処理を軽くするため）
+    #    ただし、分類が必要なのでマッピングします
+    
+    # 借方・貸方の科目に分類をマッピング
+    df_copy['借方分類'] = df_copy['勘定科目(借方)'].map(ACCOUNT_TYPE_MAP).fillna('不明')
+    df_copy['貸方分類'] = df_copy['勘定科目(貸方)'].map(ACCOUNT_TYPE_MAP).fillna('不明')
+
+    # 月カラム作成
+    df_copy['月'] = df_copy['日付'].dt.strftime('%Y-%m')
+
+    # 3. 集計
+    # --- 集計ロジック ---
+    # 収入 (Income): 
+    # 3-1 収益の発生
+    income_credit = df_copy[df_copy['貸方分類'] == '収益'].groupby('月')['貸方金額'].sum()
+    # 3-2 収益の取消
+    income_debit  = df_copy[df_copy['借方分類'] == '収益'].groupby('月')['借方金額'].sum()
+
+    # 3-3. 収益合計 = 貸方 - 借方
+    net_income = income_credit.sub(income_debit, fill_value=0)
+
+    # 支出 (Expense): 
+    # 3-4 費用の発生
+    expense_debit = df_copy[df_copy['借方分類'] == '費用'].groupby('月')['借方金額'].sum()
+    # 3-5 費用の取消
+    expense_credit = df_copy[df_copy['貸方分類'] == '費用'].groupby('月')['貸方金額'].sum()
+
+    #3-6.  費用合計 = 借方 - 貸方
+    net_expense = expense_debit.sub(expense_credit, fill_value=0)
+
+    # 4. データ統合
+    df_cf = pd.DataFrame({
+        '収入': net_income,
+        '支出': net_expense
+    }).fillna(0)
+
+    # 5. 収支 (Net Cash Flow) = 収入 - 支出
+    df_cf['収支'] = df_cf['収入'] - df_cf['支出']
+    
+    # index(月)を列に戻す
+    df_cf = df_cf.reset_index()
+
+    # 6. 年間累積収支の計算 ---
+    # '月' (YYYY-MM) から '年' (YYYY) を抽出
+    df_cf['年'] = df_cf['月'].str[:4]
+    
+    # 年ごとにグループ化して、収支を累積和 (cumsum) する
+    df_cf['年間累積収支'] = df_cf.groupby('年')['収支'].cumsum()
+    
+    # 月順にソート（念のため）
+    df_cf = df_cf.sort_values('月')
+
+    return df_cf
